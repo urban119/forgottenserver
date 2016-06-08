@@ -1,6 +1,6 @@
 /**
  * The Forgotten Server - a free and open-source MMORPG server emulator
- * Copyright (C) 2016  Mark Samman <mark.samman@gmail.com>
+ * Copyright (C) 2015  Mark Samman <mark.samman@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,6 +19,8 @@
 
 #ifndef FS_MAP_H_E3953D57C058461F856F5221D359DAFA
 #define FS_MAP_H_E3953D57C058461F856F5221D359DAFA
+
+#include <bitset>
 
 #include "position.h"
 #include "item.h"
@@ -46,6 +48,7 @@ struct AStarNode {
 };
 
 #define MAX_NODES 512
+#define GET_NODE_INDEX(a) (a - &nodes[0])
 
 #define MAP_NORMALWALKCOST 10
 #define MAP_DIAGONALWALKCOST 25
@@ -73,7 +76,7 @@ class AStarNodes
 		int_fast32_t closedNodes;
 };
 
-typedef std::map<Position, SpectatorVec> SpectatorCache;
+typedef std::map<Position, std::shared_ptr<SpectatorVec>> SpectatorCache;
 
 #define FLOOR_BITS 3
 #define FLOOR_SIZE (1 << FLOOR_BITS)
@@ -104,7 +107,7 @@ class QTreeNode
 		QTreeNode& operator=(const QTreeNode&) = delete;
 
 		bool isLeaf() const {
-			return leaf;
+			return m_isLeaf;
 		}
 
 		QTreeLeafNode* getLeaf(uint32_t x, uint32_t y);
@@ -113,23 +116,23 @@ class QTreeNode
 		inline static Leaf getLeafStatic(Node node, uint32_t x, uint32_t y)
 		{
 			do {
-				node = node->child[((x & 0x8000) >> 15) | ((y & 0x8000) >> 14)];
+				node = node->m_child[((x & 0x8000) >> 15) | ((y & 0x8000) >> 14)];
 				if (!node) {
 					return nullptr;
 				}
 
 				x <<= 1;
 				y <<= 1;
-			} while (!node->leaf);
-			return static_cast<Leaf>(node);
+			} while (!node->m_isLeaf);
+			return reinterpret_cast<Leaf>(node);
 		}
 
 		QTreeLeafNode* createLeaf(uint32_t x, uint32_t y, uint32_t level);
 
 	protected:
-		QTreeNode* child[4];
+		QTreeNode* m_child[4];
 
-		bool leaf;
+		bool m_isLeaf;
 
 		friend class Map;
 };
@@ -146,7 +149,7 @@ class QTreeLeafNode final : public QTreeNode
 
 		Floor* createFloor(uint32_t z);
 		Floor* getFloor(uint8_t z) const {
-			return array[z];
+			return m_array[z];
 		}
 
 		void addCreature(Creature* c);
@@ -154,9 +157,9 @@ class QTreeLeafNode final : public QTreeNode
 
 	protected:
 		static bool newLeaf;
-		QTreeLeafNode* leafS;
-		QTreeLeafNode* leafE;
-		Floor* array[MAP_MAX_LAYERS];
+		QTreeLeafNode* m_leafS;
+		QTreeLeafNode* m_leafE;
+		Floor* m_array[MAP_MAX_LAYERS];
 		CreatureVector creature_list;
 		CreatureVector player_list;
 
@@ -186,7 +189,8 @@ class Map
 		  * \returns true if the map was loaded successfully
 		  */
 		bool loadMap(const std::string& identifier, bool loadHouses);
-
+		//@Urban
+		bool loadMapU(const std::string& identifier, bool loadHouses, int place_x, int place_y);
 		/**
 		  * Save a map.
 		  * \returns true if the map was saved successfully
@@ -211,6 +215,14 @@ class Map
 		}
 
 		/**
+		* Set a single tile. @Urban
+		*/
+		void setTileU(uint16_t x, uint16_t y, uint8_t z, Tile* newTile);
+		void setTileU(const Position& pos, Tile* newTile) {
+			setTileU(pos.x + 10, pos.y + 10, pos.z, newTile);
+		}
+
+		/**
 		  * Place a creature on the map
 		  * \param centerPos The position to place the creature
 		  * \param creature Creature to place on the map
@@ -232,7 +244,7 @@ class Map
 		                   int32_t minRangeY = 0, int32_t maxRangeY = 0);
 
 		void clearSpectatorCache();
-
+		
 		/**
 		  * Checks if you can throw an object to that position
 		  *	\param fromPos from Source point

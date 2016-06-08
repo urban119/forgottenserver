@@ -1,6 +1,6 @@
 /**
  * The Forgotten Server - a free and open-source MMORPG server emulator
- * Copyright (C) 2016  Mark Samman <mark.samman@gmail.com>
+ * Copyright (C) 2015  Mark Samman <mark.samman@gmail.com>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -26,16 +26,29 @@
 #include "creature.h"
 #include "monster.h"
 #include "game.h"
+#include "tile.h"
+#include "house.h"
 #include "actions.h"
+#include "combat.h"
 #include "iologindata.h"
 #include "iomarket.h"
+#include "chat.h"
 #include "talkaction.h"
 #include "spells.h"
 #include "configmanager.h"
+#include "ban.h"
+#include "raids.h"
+#include "database.h"
 #include "server.h"
+#include "ioguild.h"
+#include "quests.h"
 #include "globalevent.h"
+#include "mounts.h"
 #include "bed.h"
 #include "scheduler.h"
+#include "monster.h"
+#include "spawn.h"
+#include "connection.h"
 #include "events.h"
 #include "databasetasks.h"
 
@@ -217,6 +230,12 @@ bool Game::loadMainMap(const std::string& filename)
 void Game::loadMap(const std::string& path)
 {
 	map.loadMap(path, false);
+}
+//@Urban
+void Game::loadMapU(const std::string& path, int place_x, int place_y)
+{
+	std::cout << "[UrbanInfo - Map::loadMapU] Place x: " << place_x << ", y: " << place_y << std::endl;
+	map.loadMapU(path, false, place_x, place_y);
 }
 
 Cylinder* Game::internalGetCylinder(Player* player, const Position& pos) const
@@ -737,7 +756,7 @@ void Game::playerMoveCreature(Player* player, Creature* movingCreature, const Po
 	}
 
 	if (player != movingCreature) {
-		if (toTile->hasFlag(TILESTATE_BLOCKPATH)) {
+		if (toTile->hasProperty(CONST_PROP_BLOCKPATH)) {
 			player->sendCancelMessage(RETURNVALUE_NOTENOUGHROOM);
 			return;
 		} else if ((movingCreature->getZone() == ZONE_PROTECTION && !toTile->hasFlag(TILESTATE_PROTECTIONZONE)) || (movingCreature->getZone() == ZONE_NOPVP && !toTile->hasFlag(TILESTATE_NOPVPZONE))) {
@@ -781,12 +800,12 @@ ReturnValue Game::internalMoveCreature(Creature* creature, Direction direction, 
 		//try go up
 		if (currentPos.z != 8 && creature->getTile()->hasHeight(3)) {
 			Tile* tmpTile = map.getTile(currentPos.x, currentPos.y, currentPos.getZ() - 1);
-			if (tmpTile == nullptr || (tmpTile->getGround() == nullptr && !tmpTile->hasFlag(TILESTATE_BLOCKSOLID))) {
+			if (tmpTile == nullptr || (tmpTile->getGround() == nullptr && !tmpTile->hasProperty(CONST_PROP_BLOCKSOLID))) {
 				tmpTile = map.getTile(destPos.x, destPos.y, destPos.getZ() - 1);
-				if (tmpTile && tmpTile->getGround() && !tmpTile->hasFlag(TILESTATE_BLOCKSOLID)) {
-					flags |= FLAG_IGNOREBLOCKITEM | FLAG_IGNOREBLOCKCREATURE;
+				if (tmpTile && tmpTile->getGround() && !tmpTile->hasProperty(CONST_PROP_BLOCKSOLID)) {
+					flags = flags | FLAG_IGNOREBLOCKITEM | FLAG_IGNOREBLOCKCREATURE;
 
-					if (!tmpTile->hasFlag(TILESTATE_FLOORCHANGE)) {
+					if (!tmpTile->floorChange()) {
 						destPos.z--;
 					}
 				}
@@ -794,7 +813,7 @@ ReturnValue Game::internalMoveCreature(Creature* creature, Direction direction, 
 		} else {
 			//try go down
 			Tile* tmpTile = map.getTile(destPos.x, destPos.y, destPos.z);
-			if (currentPos.z != 7 && (tmpTile == nullptr || (tmpTile->getGround() == nullptr && !tmpTile->hasFlag(TILESTATE_BLOCKSOLID)))) {
+			if (currentPos.z != 7 && (tmpTile == nullptr || (tmpTile->getGround() == nullptr && !tmpTile->hasProperty(CONST_PROP_BLOCKSOLID)))) {
 				tmpTile = map.getTile(destPos.x, destPos.y, destPos.z + 1);
 				if (tmpTile && tmpTile->hasHeight(3)) {
 					flags |= FLAG_IGNOREBLOCKITEM | FLAG_IGNOREBLOCKCREATURE;
@@ -1026,7 +1045,7 @@ void Game::playerMoveItem(Player* player, const Position& fromPos,
 		return;
 	}
 
-	if (!g_events->eventPlayerOnMoveItem(player, item, count, fromPos, toPos, fromCylinder, toCylinder)) {
+	if (!g_events->eventPlayerOnMoveItem(player, item, count, fromPos, toPos)) {
 		return;
 	}
 
@@ -1408,9 +1427,9 @@ Item* Game::findItemOfType(Cylinder* cylinder, uint16_t itemId,
 				return item;
 			}
 
-			Container* subContainer = item->getContainer();
-			if (subContainer) {
-				containers.push_back(subContainer);
+			Container* tmpContainer = item->getContainer();
+			if (tmpContainer) {
+				containers.push_back(tmpContainer);
 			}
 		}
 	}
@@ -1423,13 +1442,13 @@ bool Game::removeMoney(Cylinder* cylinder, uint64_t money, uint32_t flags /*= 0*
 		return false;
 	}
 
-	if (money == 0) {
+	if (money <= 0) {
 		return true;
 	}
 
 	std::vector<Container*> containers;
 
-	std::multimap<uint32_t, Item*> moneyMap;
+	std::multimap<uint64_t, Item*> moneyMap;
 	uint64_t moneyCount = 0;
 
 	for (size_t i = cylinder->getFirstIndex(), j = cylinder->getLastIndex(); i < j; ++i) {
@@ -1447,7 +1466,7 @@ bool Game::removeMoney(Cylinder* cylinder, uint64_t money, uint32_t flags /*= 0*
 		if (container) {
 			containers.push_back(container);
 		} else {
-			const uint32_t worth = item->getWorth();
+			int32_t worth = item->getWorth();
 			if (worth != 0) {
 				moneyCount += worth;
 				moneyMap.emplace(worth, item);
@@ -1463,7 +1482,7 @@ bool Game::removeMoney(Cylinder* cylinder, uint64_t money, uint32_t flags /*= 0*
 			if (tmpContainer) {
 				containers.push_back(tmpContainer);
 			} else {
-				const uint32_t worth = item->getWorth();
+				int32_t worth = item->getWorth();
 				if (worth != 0) {
 					moneyCount += worth;
 					moneyMap.emplace(worth, item);
@@ -1478,55 +1497,50 @@ bool Game::removeMoney(Cylinder* cylinder, uint64_t money, uint32_t flags /*= 0*
 
 	for (const auto& moneyEntry : moneyMap) {
 		Item* item = moneyEntry.second;
-		if (moneyEntry.first < money) {
-			internalRemoveItem(item);
-			money -= moneyEntry.first;
-		} else if (moneyEntry.first > money) {
-			const uint32_t worth = moneyEntry.first / item->getItemCount();
-			const uint32_t removeCount = (money / worth) + 1;
+		if (moneyEntry.first > money) {
+			uint32_t worth = moneyEntry.first / item->getItemCount();
+			uint32_t removeCount = (money / worth) + 1;
 
 			addMoney(cylinder, (worth * removeCount) - money, flags);
 			internalRemoveItem(item, removeCount);
-			break;
+			money = 0;
 		} else {
 			internalRemoveItem(item);
-			break;
+			money -= moneyEntry.first;
+		}
+
+		if (money == 0) {
+			return true;
 		}
 	}
-	return true;
+	return false;
 }
 
 void Game::addMoney(Cylinder* cylinder, uint64_t money, uint32_t flags /*= 0*/)
 {
-	if (money == 0) {
-		return;
-	}
-
-	uint32_t crystalCoins = money / 10000;
-	money -= crystalCoins * 10000;
-	while (crystalCoins > 0) {
-		const uint16_t count = std::min<uint32_t>(100, crystalCoins);
-
-		Item* remaindItem = Item::CreateItem(ITEM_CRYSTAL_COIN, count);
+	uint32_t crys = money / 10000;
+	money -= crys * 10000;
+	while (crys > 0) {
+		Item* remaindItem = Item::CreateItem(ITEM_CRYSTAL_COIN, std::min<int32_t>(100, crys));
 
 		ReturnValue ret = internalAddItem(cylinder, remaindItem, INDEX_WHEREEVER, flags);
 		if (ret != RETURNVALUE_NOERROR) {
 			internalAddItem(cylinder->getTile(), remaindItem, INDEX_WHEREEVER, FLAG_NOLIMIT);
 		}
 
-		crystalCoins -= count;
+		crys -= std::min<int32_t>(100, crys);
 	}
 
-	uint16_t platinumCoins = money / 100;
-	if (platinumCoins != 0) {
-		Item* remaindItem = Item::CreateItem(ITEM_PLATINUM_COIN, platinumCoins);
+	uint16_t plat = money / 100;
+	if (plat != 0) {
+		Item* remaindItem = Item::CreateItem(ITEM_PLATINUM_COIN, plat);
 
 		ReturnValue ret = internalAddItem(cylinder, remaindItem, INDEX_WHEREEVER, flags);
 		if (ret != RETURNVALUE_NOERROR) {
 			internalAddItem(cylinder->getTile(), remaindItem, INDEX_WHEREEVER, FLAG_NOLIMIT);
 		}
 
-		money -= platinumCoins * 100;
+		money -= plat * 100;
 	}
 
 	if (money != 0) {
@@ -1603,6 +1617,7 @@ Item* Game::transformItem(Item* item, uint16_t newId, int32_t newCount /*= -1*/)
 				return nullptr;
 			} else {
 				int32_t newItemId = newId;
+
 				if (curType.id == newType.id) {
 					newItemId = curType.decayTo;
 				}
@@ -1814,7 +1829,7 @@ void Game::playerOpenChannel(uint32_t playerId, uint16_t channelId)
 		return;
 	}
 
-	const InvitedMap* invitedUsers = channel->getInvitedUsers();
+	const InvitedMap* invitedUsers = channel->getInvitedUsersPtr();
 	const UsersMap* users;
 	if (!channel->isPublicChannel()) {
 		users = &channel->getUsers();
@@ -2397,13 +2412,10 @@ void Game::playerUpdateHouseWindow(uint32_t playerId, uint8_t listId, uint32_t w
 	uint32_t internalListId;
 
 	House* house = player->getEditHouse(internalWindowTextId, internalListId);
-	if (house && house->canEditAccessList(internalListId, player) && internalWindowTextId == windowTextId && listId == 0) {
+	if (house && internalWindowTextId == windowTextId && listId == 0) {
 		house->setAccessList(internalListId, text);
 		player->setEditHouse(nullptr);
-		return;
 	}
-
-	player->setEditHouse(nullptr);
 }
 
 void Game::playerRequestTrade(uint32_t playerId, const Position& pos, uint8_t stackPos,
@@ -2531,7 +2543,7 @@ bool Game::internalStartTrade(Player* player, Player* tradePartner, Item* tradeI
 	tradeItem->incrementReferenceCounter();
 	tradeItems[tradeItem] = player->getID();
 
-	player->sendTradeItemRequest(player->getName(), tradeItem, true);
+	player->sendTradeItemRequest(player, tradeItem, true);
 
 	if (tradePartner->tradeState == TRADE_NONE) {
 		std::ostringstream ss;
@@ -2541,8 +2553,8 @@ bool Game::internalStartTrade(Player* player, Player* tradePartner, Item* tradeI
 		tradePartner->tradePartner = player;
 	} else {
 		Item* counterOfferItem = tradePartner->tradeItem;
-		player->sendTradeItemRequest(tradePartner->getName(), counterOfferItem, false);
-		tradePartner->sendTradeItemRequest(player->getName(), tradeItem, false);
+		player->sendTradeItemRequest(tradePartner, counterOfferItem, false);
+		tradePartner->sendTradeItemRequest(player, tradeItem, false);
 	}
 
 	return true;
@@ -4393,7 +4405,7 @@ void Game::shutdown()
 		serviceManager->stop();
 	}
 
-	ConnectionManager::getInstance().closeAll();
+	ConnectionManager::getInstance()->closeAll();
 
 	std::cout << " done!" << std::endl;
 }
@@ -4647,7 +4659,7 @@ bool Game::loadExperienceStages()
 		return false;
 	}
 
-	for (auto stageNode : doc.child("stages").children()) {
+	for (pugi::xml_node stageNode = doc.child("stages").first_child(); stageNode; stageNode = stageNode.next_sibling()) {
 		if (strcasecmp(stageNode.name(), "config") == 0) {
 			stagesEnabled = stageNode.attribute("enabled").as_bool();
 		} else {
@@ -4835,7 +4847,7 @@ void Game::kickPlayer(uint32_t playerId, bool displayEffect)
 	player->kickPlayer(displayEffect);
 }
 
-void Game::playerReportBug(uint32_t playerId, const std::string& message, const Position& position, uint8_t category)
+void Game::playerReportBug(uint32_t playerId, const std::string& bug)
 {
 	Player* player = getPlayerByID(playerId);
 	if (!player) {
@@ -4848,18 +4860,11 @@ void Game::playerReportBug(uint32_t playerId, const std::string& message, const 
 
 	std::string fileName = "data/reports/" + player->getName() + " report.txt";
 	FILE* file = fopen(fileName.c_str(), "a");
-	if (!file) {
-		player->sendTextMessage(MESSAGE_EVENT_DEFAULT, "There was an error when processing your report, please contact a gamemaster.");
-		return;
+	if (file) {
+		const Position& position = player->getPosition();
+		fprintf(file, "------------------------------\nName: %s [Position X: %u Y: %u Z: %u]\nBug Report: %s\n", player->getName().c_str(), position.x, position.y, position.z, bug.c_str());
+		fclose(file);
 	}
-
-	const Position& playerPosition = player->getPosition();
-	if (category == BUG_CATEGORY_MAP) {
-		fprintf(file, "------------------------------\nName: %s [Map Position: %u, %u, %u] [Player Position: %u, %u, %u]\nComment: %s\n", player->getName().c_str(), position.x, position.y, position.z, playerPosition.x, playerPosition.y, playerPosition.z, message.c_str());
-	} else {
-		fprintf(file, "------------------------------\nName: %s [Player Position: %u, %u, %u]\nComment: %s\n", player->getName().c_str(), playerPosition.x, playerPosition.y, playerPosition.z, message.c_str());
-	}
-	fclose(file);
 
 	player->sendTextMessage(MESSAGE_EVENT_DEFAULT, "Your report has been sent to " + g_config.getString(ConfigManager::SERVER_NAME) + ".");
 }
@@ -5452,11 +5457,6 @@ Guild* Game::getGuild(uint32_t id) const
 void Game::addGuild(Guild* guild)
 {
 	guilds[guild->getId()] = guild;
-}
-
-void Game::removeGuild(uint32_t guildId)
-{
-	guilds.erase(guildId);
 }
 
 void Game::decreaseBrowseFieldRef(const Position& pos)
